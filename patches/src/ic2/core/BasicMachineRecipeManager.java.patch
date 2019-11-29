@@ -1,0 +1,548 @@
+--- ic2/core/BasicMachineRecipeManager.java
++++ ic2/core/BasicMachineRecipeManager.java
+@@ -1,174 +1,206 @@
+ package ic2.core;
+ 
+ import cpw.mods.fml.common.eventhandler.SubscribeEvent;
+-import ic2.api.recipe.IMachineRecipeManagerExt;
+-import ic2.api.recipe.IRecipeInput;
+-import ic2.api.recipe.RecipeInputItemStack;
+-import ic2.api.recipe.RecipeInputOreDict;
+-import ic2.api.recipe.RecipeOutput;
++import ic2.api.recipe.*;
+ import ic2.core.init.MainConfig;
+ import ic2.core.util.LogCategory;
+ import ic2.core.util.StackUtil;
+-import ic2.core.util.Tuple.T2;
+-import java.util.AbstractMap;
+-import java.util.AbstractSet;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.HashMap;
+-import java.util.IdentityHashMap;
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.ListIterator;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.Map.Entry;
+ import net.minecraft.item.Item;
+ import net.minecraft.item.ItemStack;
+ import net.minecraft.nbt.NBTTagCompound;
+ import net.minecraftforge.common.MinecraftForge;
+-import net.minecraftforge.oredict.OreDictionary.OreRegisterEvent;
++import org.cliffc.high_scale_lib.NonBlockingHashMap;
++import org.cliffc.high_scale_lib.NonBlockingIdentityHashMap;
+ 
++import java.util.*;
++import java.util.stream.Collectors;
++import java.util.stream.Stream;
++
++import static java.util.Map.Entry;
++import static net.minecraftforge.oredict.OreDictionary.OreRegisterEvent;
++
+ public class BasicMachineRecipeManager implements IMachineRecipeManagerExt {
+- private final Map<IRecipeInput, RecipeOutput> recipes = new HashMap();
+- private final Map<Item, Map<Integer, T2<IRecipeInput, RecipeOutput>>> recipeCache = new IdentityHashMap();
+- private final List<T2<IRecipeInput, RecipeOutput>> uncacheableRecipes = new ArrayList();
++ private final Map<IRecipeInput, RecipeOutput>
++  recipes = new NonBlockingHashMap<>(),
++  uncacheableRecipes = new NonBlockingHashMap<>();
++ private final Map<Item, Map<Integer, Entry<IRecipeInput, RecipeOutput>>>
++  recipeCache = new NonBlockingIdentityHashMap<>();
+  private boolean oreRegisterEventSubscribed;
+ 
+- public void addRecipe(IRecipeInput input, NBTTagCompound metadata, ItemStack... outputs) {
+-  if (!this.addRecipe(input, metadata, false, outputs)) {
+-   this.displayError("ambiguous recipe: [" + input.getInputs() + " -> " + Arrays.asList(outputs) + "]");
++ //DONE
++ private void displayError(String msg) {
++  if (MainConfig.ignoreInvalidRecipes) {
++   IC2.log.warn(LogCategory.Recipe, msg);
++  } else {
++   throw new RuntimeException(msg);
+   }
++ }
+ 
++ //DONE
++ public void addRecipe(IRecipeInput input, NBTTagCompound metadata, ItemStack... outputs) {
++  if (!addRecipe(input, metadata, false, outputs)) {
++   displayError("ambiguous recipe: [" + input.getInputs() + " -> " + Arrays.asList(outputs) + "]");
++  }
+  }
+ 
++ //DONE
+  public boolean addRecipe(IRecipeInput input, NBTTagCompound metadata, boolean overwrite, ItemStack... outputs) {
+-  return this.addRecipe(input, new RecipeOutput(metadata, outputs), overwrite);
++  return addRecipe(input, new RecipeOutput(metadata, outputs), overwrite);
+  }
+ 
+- public RecipeOutput getOutputFor(ItemStack input, boolean adjustInput) {
+-  if (input == null) {
+-   return null;
+-  } else {
+-   T2<IRecipeInput, RecipeOutput> data = this.getRecipe(input);
+-   if (data == null) {
+-    return null;
+-   } else if (input.stackSize < ((IRecipeInput)data.a).getAmount() || input.getItem().hasContainerItem(input) && input.stackSize != ((IRecipeInput)data.a).getAmount()) {
+-    return null;
+-   } else {
+-    if (adjustInput) {
+-     if (input.getItem().hasContainerItem(input)) {
+-      ItemStack container = input.getItem().getContainerItem(input);
+-      input.func_150996_a(container.getItem());
+-      input.stackSize = container.stackSize;
+-      input.setItemDamage(container.getItemDamage());
+-      input.stackTagCompound = container.stackTagCompound;
++ //TODO ensure that this function works as intended
++ //DONE
++ public Map<IRecipeInput, RecipeOutput> getRecipes() {
++  return recipes;
++ }
++
++ //TODO ensure that this function works as intended
++ //DONE
++ public RecipeOutput getOutputFor(final ItemStack input, final boolean adjustInput) {
++  if (input != null) {
++   final Entry<IRecipeInput, RecipeOutput> data = getRecipe(input);
++   if (data != null) {
++    final IRecipeInput key = data.getKey();
++    final int amount = key.getAmount();
++    final Item item = input.getItem();
++    if (!(input.stackSize < amount || item.hasContainerItem(input) && input.stackSize < amount)) {
++     if (adjustInput) {
++      if (item.hasContainerItem(input)) {
++       final ItemStack container = item.getContainerItem(input);
++       input.func_150996_a(container.getItem());
++       input.stackSize = container.stackSize;
++       input.setItemDamage(container.getItemDamage());
++       input.stackTagCompound = container.stackTagCompound;
++      }
+      } else {
+-      input.stackSize -= ((IRecipeInput)data.a).getAmount();
++      input.stackSize -= amount;
+      }
++     return data.getValue();
+     }
+-
+-    return (RecipeOutput)data.b;
+    }
+   }
++  return null;
+  }
+ 
+- public Map<IRecipeInput, RecipeOutput> getRecipes() {
+-  return new AbstractMap<IRecipeInput, RecipeOutput>() {
+-   public Set<Entry<IRecipeInput, RecipeOutput>> entrySet() {
+-    return new AbstractSet<Entry<IRecipeInput, RecipeOutput>>() {
+-     public Iterator<Entry<IRecipeInput, RecipeOutput>> iterator() {
+-      return new Iterator<Entry<IRecipeInput, RecipeOutput>>() {
+-       private final Iterator<Entry<IRecipeInput, RecipeOutput>> recipeIt;
+-       private IRecipeInput lastInput;
+-
+-       {
+-        this.recipeIt = BasicMachineRecipeManager.this.recipes.entrySet().iterator();
++ //DONE
++ private List<ItemStack> getStacksFromRecipe(final IRecipeInput recipe) {
++  if (recipe.getClass().equals(RecipeInputItemStack.class)) {
++   return recipe.getInputs();
++  } else if (recipe.getClass().equals(RecipeInputOreDict.class)) {
++   final Integer meta = ((RecipeInputOreDict)recipe).meta;
++   if (meta == null) {
++    return recipe.getInputs();
++   } else {
++    //TODO verify that the insertion order does not matter with this (parallel stream)
++    List<ItemStack> ret = new ArrayList<>(recipe.getInputs());
++    try (final Stream<ItemStack> stream = ret.parallelStream()) {
++     return stream
++      .map(s -> {
++       if (s.getItemDamage() != meta) {
++        s = s.copy();
++        s.setItemDamage(meta);
+        }
+-
+-       public boolean hasNext() {
+-        return this.recipeIt.hasNext();
+-       }
+-
+-       public Entry<IRecipeInput, RecipeOutput> next() {
+-        Entry<IRecipeInput, RecipeOutput> ret = (Entry)this.recipeIt.next();
+-        this.lastInput = (IRecipeInput)ret.getKey();
+-        return ret;
+-       }
+-
+-       public void remove() {
+-        this.recipeIt.remove();
+-        BasicMachineRecipeManager.this.removeCachedRecipes(this.lastInput);
+-       }
+-      };
+-     }
+-
+-     public int size() {
+-      return BasicMachineRecipeManager.this.recipes.size();
+-     }
+-    };
+-   }
+-
+-   public RecipeOutput put(IRecipeInput key, RecipeOutput value) {
+-    BasicMachineRecipeManager.this.addRecipe(key, value, true);
+-    return null;
+-   }
+-  };
+- }
+-
+- @SubscribeEvent
+- public void onOreRegister(OreRegisterEvent event) {
+-  List<T2<IRecipeInput, RecipeOutput>> datas = new ArrayList();
+-  Iterator var3 = this.recipes.entrySet().iterator();
+-
+-  while(var3.hasNext()) {
+-   Entry<IRecipeInput, RecipeOutput> data = (Entry)var3.next();
+-   if (((IRecipeInput)data.getKey()).getClass() == RecipeInputOreDict.class) {
+-    RecipeInputOreDict recipe = (RecipeInputOreDict)data.getKey();
+-    if (recipe.input.equals(event.Name)) {
+-     datas.add(new T2(data.getKey(), data.getValue()));
++       return s;
++      })
++      .collect(Collectors.toList());
++    } catch (final Throwable t) {
++     throw new RuntimeException(t);
+     }
+    }
+   }
+-
+-  var3 = datas.iterator();
+-
+-  while(var3.hasNext()) {
+-   T2<IRecipeInput, RecipeOutput> data = (T2)var3.next();
+-   this.addToCache(event.Ore, data);
+-  }
+-
++  return null;
+  }
+ 
+- private T2<IRecipeInput, RecipeOutput> getRecipe(ItemStack input) {
+-  Map<Integer, T2<IRecipeInput, RecipeOutput>> metaMap = (Map)this.recipeCache.get(input.getItem());
++ //DONE
++ private Entry<IRecipeInput, RecipeOutput> getRecipe(final ItemStack input) {
++  final Map<Integer, Entry<IRecipeInput, RecipeOutput>> metaMap = recipeCache.get(input.getItem());
++  Entry<IRecipeInput, RecipeOutput> data;
+   if (metaMap != null) {
+-   T2<IRecipeInput, RecipeOutput> data = (T2)metaMap.get(32767);
++   data = metaMap.get(32767);
+    if (data != null) {
+     return data;
+    }
+-
+    int meta = input.getItemDamage();
+-   data = (T2)metaMap.get(meta);
++   data = metaMap.get(meta);
+    if (data != null) {
+     return data;
+    }
+-  }
+-
+-  Iterator var5 = this.uncacheableRecipes.iterator();
+-
+-  T2 data;
+-  do {
+-   if (!var5.hasNext()) {
+-    return null;
++  } else {
++   try (final Stream<Entry<IRecipeInput, RecipeOutput>> stream = uncacheableRecipes.entrySet().parallelStream()) {
++    data = stream
++     .filter(e -> e.getKey().matches(input))
++     .findFirst()
++     .orElse(null);
++   } catch (final Throwable t) {
++    throw new RuntimeException(t);
+    }
+-
+-   data = (T2)var5.next();
+-  } while(!((IRecipeInput)data.a).matches(input));
+-
++  }
+   return data;
+  }
+ 
+- private boolean addRecipe(IRecipeInput input, RecipeOutput output, boolean overwrite) {
++ //DONE
++// private boolean addRecipe(final IRecipeInput input, final RecipeOutput output, final boolean overwrite) {
++//  if (input != null) {
++//   final boolean[] errorEncountered = { false };
++//
++//   final List<ItemStack> items = output.items, result;
++//   Stream<ItemStack> stream = items.parallelStream();
++//   result = stream.filter(stack -> {
++//    if (stack == null) {
++//     displayError("An output ItemStack is null.");
++//     errorEncountered[0] = true;
++//     return false;
++//    }
++//    return true;
++//   })
++//   .map(stack -> {
++//    if (!StackUtil.check(stack)) {
++//     displayError("The output ItemStack " + StackUtil.toStringSafe(stack) + " is invalid.");
++//     errorEncountered[0] = true;
++//    } else if (input.matches(stack) && (output.metadata == null || !output.metadata.hasKey("ignoreSameInputOutput"))) {
++//     displayError("The output ItemStack " + stack.toString() + " is the same as the recipe input " + input + ".");
++//     errorEncountered[0] = true;z
++//    }
++//    return stack.copy();
++//   })
++//   .collect(Collectors.toList());
++//   stream.close();
++//   items.clear();
++//   items.addAll(result);
++//
++//   if (!errorEncountered[0]) {
++//    while (true) {
++//     final Iterator<ItemStack> itr = input.getInputs().iterator();
++//     Entry<IRecipeInput, RecipeOutput> data;
++//     ItemStack is;
++//
++//     do {
++//      if (!itr.hasNext()) {
++//       recipes.put(input, output);
++//       addToCache(input, output);
++//       return true;
++//      }
++//
++//      is = itr.next();
++//      data = getRecipe(is);
++//     } while (data == null);
++//
++//     if (!overwrite) {
++//      return false;
++//     }
++//
++//     //TODO this is where the infinite loop was
++//     final IRecipeInput key = data.getKey();
++//     recipes.remove(key);
++//     removeCachedRecipes(key);
++//    }
++//   }
++//  }
++//  return false;
++// }
++
++ //TODO
++ private boolean addRecipe(final IRecipeInput input, final RecipeOutput output, final boolean overwrite) {
+   if (input == null) {
+    this.displayError("The recipe input is null");
+    return false;
+@@ -196,135 +228,115 @@
+     it.set(is.copy());
+    }
+ 
+-   Iterator var7 = input.getInputs().iterator();
++   while (true) {
++    final Iterator<ItemStack> itr = input.getInputs().iterator();
++    Entry<IRecipeInput, RecipeOutput> data;
+ 
+-   while(true) {
+-    T2 data;
+     do {
+-     if (!var7.hasNext()) {
+-      this.recipes.put(input, output);
+-      this.addToCache(input, output);
++     if (!itr.hasNext()) {
++      recipes.put(input, output);
++      addToCache(input, output);
+       return true;
+      }
+ 
+-     is = (ItemStack)var7.next();
+-     data = this.getRecipe(is);
+-    } while(data == null);
++     is = itr.next();
++     data = getRecipe(is);
++    } while (data == null);
+ 
+     if (!overwrite) {
+      return false;
+     }
+ 
+-    while(true) {
+-     this.recipes.remove(data.a);
+-     this.removeCachedRecipes((IRecipeInput)data.a);
+-     data = this.getRecipe(is);
+-     if (data == null) {
+-      break;
+-     }
+-    }
++    //TODO this is where the infinite loop was
++    final IRecipeInput key = data.getKey();
++    recipes.remove(key);
++    removeCachedRecipes(key);
+    }
+   }
+  }
+ 
+- private void addToCache(IRecipeInput input, RecipeOutput output) {
+-  T2<IRecipeInput, RecipeOutput> data = new T2(input, output);
+-  List<ItemStack> stacks = this.getStacksFromRecipe(input);
++ //DONE
++ private void addToCache(final IRecipeInput input, final RecipeOutput output) {
++  final Entry<IRecipeInput, RecipeOutput> data = new AbstractMap.SimpleEntry<>(input, output);
++  final List<ItemStack> stacks = getStacksFromRecipe(input);
+   if (stacks != null) {
+-   Iterator var5 = stacks.iterator();
+-
+-   while(var5.hasNext()) {
+-    ItemStack stack = (ItemStack)var5.next();
+-    this.addToCache(stack, data);
+-   }
+-
+-   if (input.getClass() == RecipeInputOreDict.class && !this.oreRegisterEventSubscribed) {
++   stacks
++    .parallelStream()
++    .peek(s -> addToCache(s, data))
++    .close();
++   if (input.getClass().equals(RecipeInputOreDict.class) && !oreRegisterEventSubscribed) {
+     MinecraftForge.EVENT_BUS.register(this);
+-    this.oreRegisterEventSubscribed = true;
++    oreRegisterEventSubscribed = true;
+    }
+   } else {
+-   this.uncacheableRecipes.add(data);
++   uncacheableRecipes.put(input, output);
+   }
+-
+  }
+ 
+- private void addToCache(ItemStack stack, T2<IRecipeInput, RecipeOutput> data) {
+-  Item item = stack.getItem();
+-  Map<Integer, T2<IRecipeInput, RecipeOutput>> metaMap = (Map)this.recipeCache.get(item);
++ //DONE
++ private void addToCache(final ItemStack stack, final Entry<IRecipeInput, RecipeOutput> data) {
++  final Item item = stack.getItem();
++  Map<Integer, Entry<IRecipeInput, RecipeOutput>> metaMap = recipeCache.get(item);
+   if (metaMap == null) {
+-   metaMap = new HashMap();
+-   this.recipeCache.put(item, metaMap);
++   metaMap = new NonBlockingHashMap<>();
++   recipeCache.put(item, metaMap);
+   }
+-
+-  int meta = stack.getItemDamage();
+-  ((Map)metaMap).put(meta, data);
++  metaMap.put(stack.getItemDamage(), data);
+  }
+ 
+- private void removeCachedRecipes(IRecipeInput input) {
+-  List<ItemStack> stacks = this.getStacksFromRecipe(input);
+-  Iterator it;
++ //DONE
++ private void removeCachedRecipes(final IRecipeInput input) {
++  final List<ItemStack> stacks = getStacksFromRecipe(input);
+   if (stacks != null) {
+-   it = stacks.iterator();
+-
+-   while(it.hasNext()) {
+-    ItemStack stack = (ItemStack)it.next();
+-    Item item = stack.getItem();
+-    int meta = stack.getItemDamage();
+-    Map<Integer, T2<IRecipeInput, RecipeOutput>> map = (Map)this.recipeCache.get(item);
+-    if (map == null) {
+-     IC2.log.warn(LogCategory.Recipe, "Inconsistent recipe cache, the entry for the item " + item + "(" + stack + ") is missing.");
+-    } else {
+-     map.remove(meta);
+-     if (map.isEmpty()) {
+-      this.recipeCache.remove(item);
++   stacks
++    .parallelStream()
++    .peek(stack -> {
++     final Item item = stack.getItem();
++     int meta = stack.getItemDamage();
++     final Map<Integer, Entry<IRecipeInput, RecipeOutput>> map = recipeCache.get(item);
++     if (map == null) {
++      IC2.log.warn(
++       LogCategory.Recipe,
++       "Inconsistent recipe cache, the entry for the item " + item + "(" + stack + ") is missing."
++      );
++     } else {
++      map.remove(meta);
++      if (map.isEmpty()) {
++       recipeCache.remove(item);
++      }
+      }
+-    }
+-   }
++    })
++    .close();
+   } else {
+-   it = this.uncacheableRecipes.iterator();
+-
+-   while(it.hasNext()) {
+-    T2<IRecipeInput, RecipeOutput> data = (T2)it.next();
+-    if (data.a == input) {
+-     it.remove();
+-    }
+-   }
++   //TODO why not just:
++   // uncacheableRecipes.remove(input);
++   uncacheableRecipes
++    .entrySet()
++    .parallelStream()
++    .peek(e -> {
++     final IRecipeInput key = e.getKey();
++     if (key == input) {
++      uncacheableRecipes.remove(key);
++     }
++    })
++    .close();
+   }
+-
+  }
+ 
+- private List<ItemStack> getStacksFromRecipe(IRecipeInput recipe) {
+-  if (recipe.getClass() == RecipeInputItemStack.class) {
+-   return recipe.getInputs();
+-  } else if (recipe.getClass() == RecipeInputOreDict.class) {
+-   Integer meta = ((RecipeInputOreDict)recipe).meta;
+-   if (meta == null) {
+-    return recipe.getInputs();
+-   } else {
+-    List<ItemStack> ret = new ArrayList(recipe.getInputs());
+-    ListIterator it = ret.listIterator();
+-
+-    while(it.hasNext()) {
+-     ItemStack stack = (ItemStack)it.next();
+-     if (stack.getItemDamage() != meta) {
+-      stack = stack.copy();
+-      stack.setItemDamage(meta);
+-      it.set(stack);
+-     }
++ //DONE
++ @SubscribeEvent
++ public void onOreRegister(final OreRegisterEvent event) {
++  recipes
++   .entrySet()
++   .parallelStream()
++   .filter(e -> {
++    final IRecipeInput key = e.getKey();
++    if (key.getClass().equals(RecipeInputOreDict.class)) {
++     return ((RecipeInputOreDict)key).input.equals(event.Name);
+     }
+-
+-    return ret;
+-   }
+-  } else {
+-   return null;
+-  }
++    return false;
++   })
++   .peek(e -> addToCache(event.Ore, e))
++   .close();
+  }
+-
+- private void displayError(String msg) {
+-  if (MainConfig.ignoreInvalidRecipes) {
+-   IC2.log.warn(LogCategory.Recipe, msg);
+-  } else {
+-   throw new RuntimeException(msg);
+-  }
+- }
+ }
